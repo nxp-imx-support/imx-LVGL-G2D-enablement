@@ -1,0 +1,132 @@
+diff -urN imx-LVGL-G2D/lvgl/src/draw/nxp/lv_draw_nxp.mk imx-LVGL-G2D-enable/lvgl/src/draw/nxp/lv_draw_nxp.mk
+--- imx-LVGL-G2D/lvgl/src/draw/nxp/lv_draw_nxp.mk	2024-05-28 16:36:33.787598410 +0900
++++ imx-LVGL-G2D-enable/lvgl/src/draw/nxp/lv_draw_nxp.mk	2024-05-28 16:15:21.374274961 +0900
+@@ -5,3 +5,4 @@
+ 
+ include $(LVGL_DIR)/$(LVGL_DIR_NAME)/src/draw/nxp/pxp/lv_draw_nxp_pxp.mk
+ include $(LVGL_DIR)/$(LVGL_DIR_NAME)/src/draw/nxp/vglite/lv_draw_nxp_vglite.mk
++include $(LVGL_DIR)/$(LVGL_DIR_NAME)/src/draw/nxp/g2d/lv_draw_nxp_g2d.mk
+\ No newline at end of file
+diff -urN imx-LVGL-G2D/lvgl/src/hal/lv_hal_disp.c imx-LVGL-G2D-enable/lvgl/src/hal/lv_hal_disp.c
+--- imx-LVGL-G2D/lvgl/src/hal/lv_hal_disp.c	2024-05-28 16:36:33.879582243 +0900
++++ imx-LVGL-G2D-enable/lvgl/src/hal/lv_hal_disp.c	2024-05-28 17:04:57.340713938 +0900
+@@ -26,6 +26,7 @@
+ #include "../draw/nxp/vglite/lv_draw_vglite.h"
+ #include "../draw/nxp/pxp/lv_draw_pxp.h"
+ #include "../draw/renesas/lv_gpu_d2_ra6m3.h"
++#include "../draw/nxp/g2d/lv_draw_g2d.h"
+ 
+ #if LV_USE_THEME_DEFAULT
+     #include "../extra/themes/default/lv_theme_default.h"
+@@ -116,6 +117,10 @@
+     driver->draw_ctx_init = lv_draw_pxp_ctx_init;
+     driver->draw_ctx_deinit = lv_draw_pxp_ctx_deinit;
+     driver->draw_ctx_size = sizeof(lv_draw_pxp_ctx_t);
++#elif LV_USE_GPU_NXP_G2D
++    driver->draw_ctx_init = lv_draw_g2d_ctx_init;
++    driver->draw_ctx_deinit = lv_draw_g2d_ctx_deinit;
++    driver->draw_ctx_size = sizeof(lv_draw_g2d_ctx_t);
+ #elif LV_USE_GPU_SDL
+     driver->draw_ctx_init = lv_draw_sdl_init_ctx;
+     driver->draw_ctx_deinit = lv_draw_sdl_deinit_ctx;
+diff -urN imx-LVGL-G2D/lv_drivers/wayland/wayland.c imx-LVGL-G2D-enable/lv_drivers/wayland/wayland.c
+--- imx-LVGL-G2D/lv_drivers/wayland/wayland.c	2024-05-28 18:03:21.105038761 +0900
++++ imx-LVGL-G2D-enable/lv_drivers/wayland/wayland.c	2024-05-28 23:20:24.659354588 +0900
+@@ -220,6 +220,7 @@
+ #if LV_WAYLAND_XDG_SHELL
+     struct xdg_surface *xdg_surface;
+     struct xdg_toplevel *xdg_toplevel;
++    uint32_t wm_capabilities;
+ #endif
+ 
+     struct buffer_allocator allocator;
+@@ -1144,10 +1145,23 @@
+      */
+ }
+ 
++static void xdg_toplevel_handle_wm_capabilities(void *data, struct xdg_toplevel *xdg_toplevel,
++                                                struct wl_array *capabilities)
++{
++    uint32_t *cap;
++    struct window *window = (struct window *)data;
++
++    wl_array_for_each(cap, capabilities) {
++        window->wm_capabilities |= (1 << (*cap));
++        /* TODO: Disable appropriate graphics/capabilities as appropriate */
++    }
++}
++
+ static const struct xdg_toplevel_listener xdg_toplevel_listener = {
+     .configure = xdg_toplevel_handle_configure,
+     .close = xdg_toplevel_handle_close,
+-    .configure_bounds = xdg_toplevel_handle_configure_bounds
++    .configure_bounds = xdg_toplevel_handle_configure_bounds,
++    .wm_capabilities = xdg_toplevel_handle_wm_capabilities
+ };
+ 
+ static void xdg_wm_base_ping(void *data, struct xdg_wm_base *xdg_wm_base, uint32_t serial)
+@@ -1950,12 +1964,12 @@
+         lv_disp_flush_ready(disp_drv);
+         return;
+     }
+-    else if (buffer->busy)
+-    {
+-        LV_LOG_WARN("skip flush since wayland backing buffer is busy");
+-        lv_disp_flush_ready(disp_drv);
+-        return;
+-    }
++    // else if (buffer->busy)
++    // {
++    //     LV_LOG_WARN("skip flush since wayland backing buffer is busy");
++    //     lv_disp_flush_ready(disp_drv);
++    //     return;
++    // }
+ 
+     int32_t x;
+     int32_t y;
+@@ -2327,7 +2341,13 @@
+     window->close_cb = close_cb;
+
+     /* Initialize draw buffer */
++#if LV_USE_GPU_NXP_G2D
++    ctx_buf = g2d_alloc(hor_res * ver_res * sizeof(lv_color_t), 1);
++    buf1 = ctx_buf->buf_vaddr;
++#else
+     buf1 = lv_mem_alloc(hor_res * ver_res * sizeof(lv_color_t));
++#endif
++
+     if (!buf1)
+     {
+         LV_LOG_ERROR("failed to allocate draw buffer");
+diff -urN imx-LVGL-G2D/lv_drivers/wayland/wayland.h imx-LVGL-G2D-enable/lv_drivers/wayland/wayland.h
+--- imx-LVGL-G2D/lv_drivers/wayland/wayland.h	2024-05-28 18:03:21.105038761 +0900
++++ imx-LVGL-G2D-enable/lv_drivers/wayland/wayland.h	2024-05-28 23:22:40.631137619 +0900
+@@ -34,6 +34,7 @@
+ #endif
+ 
+ 
++#include <custom.h>
+ /*********************
+  *      DEFINES
+  *********************/
+@@ -42,6 +43,9 @@
+  *      TYPEDEFS
+  **********************/
+ 
++#if LV_USE_GPU_NXP_G2D
++extern struct g2d_buf *ctx_buf;
++#endif
+ typedef bool (*lv_wayland_display_close_f_t)(lv_disp_t * disp);
+ 
+ /**********************
+--- imx-LVGL-G2D/lv_drivers/lv_drivers.mk	2024-05-28 18:03:21.105038761 +0900
++++ imx-LVGL-G2D-enable/lv_drivers/lv_drivers.mk	2024-05-29 10:39:42.871447995 +0900
+@@ -4,7 +4,7 @@
+ 
+ CSRCS += $(wildcard $(LVGL_DIR)/$(LV_DRIVERS_DIR_NAME)/*.c)
+ CSRCS += $(wildcard $(LVGL_DIR)/$(LV_DRIVERS_DIR_NAME)/wayland/*.c)
++CSRCS += $(wildcard $(LVGL_DIR)/$(LV_DRIVERS_DIR_NAME)/wayland/protocols/*.c)
+ CSRCS += $(wildcard $(LVGL_DIR)/$(LV_DRIVERS_DIR_NAME)/indev/*.c)
+ CSRCS += $(wildcard $(LVGL_DIR)/$(LV_DRIVERS_DIR_NAME)/gtkdrv/*.c)
+ CSRCS += $(wildcard $(LVGL_DIR)/$(LV_DRIVERS_DIR_NAME)/display/*.c)
+-CSRCS += $(wildcard $(LVGL_DIR)/$(LV_DRIVERS_DIR_NAME)/sdl/*.c)
